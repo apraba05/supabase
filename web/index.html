@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RLS-Aware MCP Query Gateway</title>
+  <style>
+    :root{color-scheme:dark;--bg:#070b12;--panel:#0d1420;--line:#263244;--text:#d7e1ee;--muted:#8290a4;--green:#3ecf8e;--cyan:#63d4ff;--red:#ff7b86;--amber:#f6c76b}
+    *{box-sizing:border-box}html,body{margin:0;min-height:100%;background:var(--bg);color:var(--text);font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace}body{overflow-x:hidden}
+    .shell{width:min(1080px,calc(100% - 32px));margin:0 auto;padding:48px 0 56px}.eyebrow{color:var(--green);font-size:12px;letter-spacing:.16em;text-transform:uppercase;margin-bottom:12px}h1{font-size:clamp(25px,4vw,42px);line-height:1.08;margin:0 0 12px;color:#f5f8fb;letter-spacing:-.035em}.lede{color:var(--muted);max-width:760px;line-height:1.6;margin:0 0 30px}
+    .pipeline{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:22px;color:var(--muted);font-size:12px}.pipeline span{border:1px solid var(--line);background:var(--panel);padding:8px 10px;border-radius:6px}.pipeline b{color:var(--green);font-weight:400}
+    .grid{display:grid;grid-template-columns:minmax(0,1fr) 280px;gap:18px}.terminal,.card{border:1px solid var(--line);background:var(--panel);border-radius:10px;box-shadow:0 20px 60px rgba(0,0,0,.25)}.bar{height:42px;border-bottom:1px solid var(--line);display:flex;align-items:center;padding:0 14px;gap:7px;color:var(--muted);font-size:12px}.dot{width:10px;height:10px;border-radius:50%;background:#ff6259}.dot:nth-child(2){background:#ffbd2e}.dot:nth-child(3){background:#28c840}.bar-label{margin-left:8px}
+    #output{height:520px;overflow:auto;padding:18px;white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;line-height:1.58;color:var(--text)}.prompt{color:var(--green)}.dim{color:var(--muted)}.info{color:var(--cyan)}.warn{color:var(--amber)}.error{color:var(--red)}
+    .controls{padding:16px}.controls h2{font-size:13px;margin:0 0 14px;color:#fff}.field{margin-bottom:14px}.field label{display:block;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.1em;margin-bottom:7px}select,textarea,button{font:inherit}select,textarea{width:100%;border:1px solid var(--line);background:#080d15;color:var(--text);border-radius:6px;padding:10px;outline:none}select:focus,textarea:focus{border-color:var(--green)}textarea{resize:vertical;min-height:118px;line-height:1.45}.buttons{display:grid;gap:8px}button{border:1px solid var(--line);background:#111b29;color:var(--text);padding:10px 12px;border-radius:6px;cursor:pointer;text-align:left}button:hover:not(:disabled){border-color:var(--green);color:#fff}button.primary{background:var(--green);border-color:var(--green);color:#04140d;font-weight:700}button:disabled{opacity:.5;cursor:not-allowed}.hint{font-size:11px;line-height:1.5;color:var(--muted);margin-top:14px}.status{display:flex;align-items:center;gap:7px;margin-left:auto}.status i{width:7px;height:7px;background:var(--green);border-radius:50%;box-shadow:0 0 10px var(--green)}
+    @media(max-width:760px){.shell{width:min(100% - 20px,1080px);padding:26px 0}.grid{grid-template-columns:1fr}.controls{order:-1}#output{height:480px}.pipeline{gap:5px}.pipeline span{padding:6px;font-size:10px}}
+  </style>
+</head>
+<body>
+<main class="shell">
+  <div class="eyebrow">Supabase security simulation</div>
+  <h1>RLS-Aware MCP Query Gateway</h1>
+  <p class="lede">Watch an LLM agent try to read another user's notes through MCP—and get blocked by Postgres Row Level Security, not application code.</p>
+  <div class="pipeline" aria-label="Request pipeline"><span>LangChain tool</span>→<span>MCP <b>query_notes</b></span>→<span>SET LOCAL <b>request.jwt.claim.sub</b></span>→<span>Postgres RLS</span></div>
+  <div class="grid">
+    <section class="terminal" aria-label="Demo output">
+      <div class="bar"><i class="dot"></i><i class="dot"></i><i class="dot"></i><span class="bar-label">agent_demo.py</span><span class="status"><i></i> offline</span></div>
+      <div id="output" role="log" aria-live="polite"></div>
+    </section>
+    <aside class="card controls">
+      <h2>Query tool</h2>
+      <div class="field"><label for="identity">JWT sub</label><select id="identity"><option value="user-a">user-a (Alice)</option><option value="user-b">user-b (Bob)</option><option value="anonymous">anonymous</option></select></div>
+      <div class="field"><label for="sql">SQL</label><textarea id="sql" spellcheck="false">SELECT id, user_id, body FROM notes ORDER BY id</textarea></div>
+      <div class="buttons"><button class="primary" id="run">Run query_notes</button><button id="demo">Replay 3 agent turns</button><button id="attack">Try cross-user read</button><button id="reset">Reset terminal</button></div>
+      <p class="hint">The browser applies the same order as Postgres: RLS first, then your WHERE clause. Only one SELECT statement is accepted.</p>
+    </aside>
+  </div>
+</main>
+<script>
+(() => {
+  'use strict';
+  const SEED_NOTES = Object.freeze([
+    {id:1,user_id:'user-a',body:'Alice: draft RLS-aware MCP gateway'},
+    {id:2,user_id:'user-a',body:'Alice: re-read auth.uid() / JWT sub docs'},
+    {id:3,user_id:'user-b',body:'Bob: private product roadmap'},
+    {id:4,user_id:'user-b',body:'Bob: secret rotation checklist'}
+  ]);
+  const TURNS = [
+    {as:'user-a',goal:'List my notes',sql:'SELECT id, user_id, body FROM notes ORDER BY id',expect:'only user-a rows'},
+    {as:'user-a',goal:"Cross-user read: filter WHERE user_id = 'user-b'",sql:"SELECT id, user_id, body FROM notes WHERE user_id = 'user-b'",expect:"empty — RLS drops Bob's rows before the WHERE helps"},
+    {as:'user-b',goal:"List my notes (prove Bob's data is still there)",sql:'SELECT id, user_id, body FROM notes ORDER BY id',expect:'only user-b rows'}
+  ];
+  const out=document.querySelector('#output'), identity=document.querySelector('#identity'), sqlBox=document.querySelector('#sql');
+  const buttons=[...document.querySelectorAll('button')]; let runToken=0;
+  const esc=s=>String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+  function print(text='',cls=''){const line=document.createElement('div');line.className=cls;line.innerHTML=esc(text);out.appendChild(line);out.scrollTop=out.scrollHeight}
+  function validateSelect(sql){const trimmed=sql.trim();if(!/^select\b/i.test(trimmed)||trimmed.replace(/;\s*$/,'').includes(';'))throw new Error('query_notes only accepts a single SELECT statement');if(!/\bfrom\s+notes\b/i.test(trimmed))throw new Error('relation is not available (query notes only)');}
+  function parseColumns(sql){const match=sql.match(/^\s*select\s+([\s\S]+?)\s+from\s+notes\b/i);if(!match)throw new Error('invalid SELECT statement');if(match[1].trim()==='*')return ['id','user_id','body'];const cols=match[1].split(',').map(x=>x.trim().toLowerCase());const allowed=['id','user_id','body'];if(!cols.length||cols.some(c=>!allowed.includes(c)))throw new Error('only id, user_id, and body columns are available');return cols;}
+  function applyWhere(rows,sql){const where=sql.match(/\bwhere\s+([\s\S]*?)(?:\border\s+by\b|\blimit\b|;|$)/i);if(!where)return rows;const term=where[1].trim();const m=term.match(/^(id|user_id|body)\s*=\s*(?:'([^']*)'|(\d+))$/i);if(!m)throw new Error('demo SQL supports a single equality WHERE predicate');const key=m[1].toLowerCase(),value=m[2]!==undefined?m[2]:Number(m[3]);return rows.filter(row=>row[key]===value);}
+  function queryNotes(jwtSub,sql){validateSelect(sql);const columns=parseColumns(sql);let rows=SEED_NOTES.filter(row=>row.user_id===jwtSub);rows=applyWhere(rows,sql);if(/\border\s+by\s+id\s+desc\b/i.test(sql))rows.sort((a,b)=>b.id-a.id);else if(/\border\s+by\s+id\b/i.test(sql))rows.sort((a,b)=>a.id-b.id);const lim=sql.match(/\blimit\s+(\d+)/i);if(lim)rows=rows.slice(0,Number(lim[1]));return {jwt_sub:jwtSub,row_count:rows.length,rows:rows.map(row=>Object.fromEntries(columns.map(c=>[c,row[c]])))};}
+  function runManual(){runToken++;print(`$ query_notes(jwt_sub='${identity.value}', sql=${JSON.stringify(sqlBox.value)})`,'prompt');try{print(JSON.stringify(queryNotes(identity.value,sqlBox.value),null,2))}catch(e){print(`Error: ${e.message}`,'error')}print()}
+  const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+  async function playDemo(){const token=++runToken;buttons.forEach(b=>b.disabled=true);out.textContent='';print('RLS-Aware MCP Query Gateway','info');print('LangChain tool → MCP query_notes → SET LOCAL request.jwt.claim.sub → RLS','dim');print();for(let i=0;i<TURNS.length;i++){if(token!==runToken)break;const t=TURNS[i];print(`--- turn ${i+1}: agent as ${t.as} ---`,'info');await wait(340);print(`goal:  ${t.goal}`);await wait(280);print(`expect: ${t.expect}`,'warn');await wait(280);print(`tool:  query_notes(jwt_sub='${t.as}', sql=${JSON.stringify(t.sql)})`,'dim');await wait(520);print(JSON.stringify(queryNotes(t.as,t.sql),null,2));print();await wait(650)}if(token===runToken)buttons.forEach(b=>b.disabled=false)}
+  document.querySelector('#run').addEventListener('click',runManual);
+  document.querySelector('#demo').addEventListener('click',playDemo);
+  document.querySelector('#attack').addEventListener('click',()=>{identity.value='user-a';sqlBox.value="SELECT id, user_id, body FROM notes WHERE user_id = 'user-b'";runManual()});
+  document.querySelector('#reset').addEventListener('click',()=>{runToken++;buttons.forEach(b=>b.disabled=false);out.textContent='';identity.value='user-a';sqlBox.value='SELECT id, user_id, body FROM notes ORDER BY id';print('Ready. Run the scripted demo or send a query.','dim')});
+  sqlBox.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key==='Enter')runManual()});
+  playDemo();
+})();
+</script>
+</body>
+</html>
